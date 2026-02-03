@@ -1,231 +1,191 @@
-# CreaGrafo
-Progetto laboratorio 2 2024/2025 contente codici in C JAVA e PYTHON di Giovanni Del Bianco, numero di matricola 636115.
+# IMDB-Graph-Explorer: Large-Scale Graph Processing
 
-# Analisi Tecnica del Sistema di Creazione e Attraversamento di Grafi
+> **University Project, Laboratory II (Final Project)**
+> **Algorithmic Engineering & Systems Programming**
+> A multi-language distributed system designed to parse the entire IMDB dataset, construct a massive co-starring graph, and perform parallel shortest-path analysis using advanced data structures.
 
-Questo documento offre un'analisi tecnica dettagliata di un sistema software composto da due programmi principali: `CreaGrafo`, sviluppato in Java, e `cammini.c`, scritto in C. Il primo si occupa della costruzione di un grafo di attori e delle loro collaborazioni a partire da dati IMDb, mentre il secondo implementa algoritmi per trovare cammini minimi all'interno di tale grafo.
-
-## Parte 1: Creazione del Grafo con `CreaGrafo` (Java)
-
-Il programma `CreaGrafo` è responsabile della fase di preprocessing: legge, filtra e struttura i dati grezzi per costruire una rappresentazione del grafo in memoria.
-
-### 1.1. Parsing e Filtraggio degli Attori da `name.basics.tsv`
-
-Il primo passo è l'identificazione degli attori di interesse dal file `name.basics.tsv`. Il processo è suddiviso in fasi sequenziali.
-
-#### Fase 1: Setup dell'I/O e Gestione delle Risorse
-
-Il processo inizia con l'apertura del file tramite un blocco `try-with-resources`, una pratica robusta e moderna in Java.
-
-```java
-try (BufferedReader br = new BufferedReader(new FileReader(pathNameBasics))) {
-    // ... logica di parsing ...
-}
-```
-
-*   **`FileReader`**: Crea un flusso di lettura a livello di caratteri direttamente dal file.
-*   **`BufferedReader`**: Incapsula il `FileReader` per ottimizzare le performance. Carica blocchi di dati (buffer) in RAM, riducendo le costose operazioni di I/O su disco.
-*   **`try-with-resources`**: Garantisce la chiusura automatica del `BufferedReader` (e del `FileReader` sottostante) al termine del blocco, anche in caso di eccezioni, prevenendo resource leak.
-
-#### Fase 2: Iterazione e Tokenizzazione delle Righe
-
-Il programma itera su ogni riga del file per estrarne i dati:
-
-1.  **Salto dell'Intestazione**: La prima riga del file (contenente i nomi delle colonne) viene letta e scartata con `br.readLine()` prima dell'inizio del ciclo.
-2.  **Ciclo di Lettura**: Un ciclo `while` itera su ogni riga successiva finché `br.readLine()` non restituisce `null` (fine del file).
-3.  **Tokenizzazione**: Ogni riga viene suddivisa in un array di stringhe usando il carattere di tabulazione (`\t`) come delimitatore.
-
-    ```java
-    // Esempio riga: "nm0000102\tKevin Bacon\t1958\t\N\tactor,producer,director\tt..."
-    String[] fields = line.split("\t");
-    // fields[0] -> "nm0000102"
-    // fields[1] -> "Kevin Bacon"
-    // ...
-    ```
-
-#### Fase 3: Estrazione e Filtraggio dei Dati
-
-Per ogni riga, vengono applicati filtri per selezionare solo gli attori rilevanti.
-
-*   **Filtro Anno di Nascita**: Se il campo `birthYear` (indice 2) è `\\N` (valore nullo di IMDb), la riga viene scartata.
-    ```java
-    if ("\\N".equals(birthYearStr)) {
-        continue;
-    }
-    ```
-*   **Filtro Professione**: Si verifica che il campo `primaryProfession` (indice 4) contenga la sottostringa `"actor"` o `"actress"`, escludendo altre figure professionali.
-    ```java
-    if (primaryProfession == null || (!primaryProfession.contains("actor") && !primaryProfession.contains("actress"))) {
-        continue;
-    }
-    ```
-
-#### Fase 4: Conversione dei Tipi e Gestione degli Errori
-
-I dati validati, ancora in formato stringa, vengono convertiti in tipi numerici. L'intero processo è protetto da un blocco `try-catch` per gestire righe malformate senza interrompere l'esecuzione.
-
-```java
-try {
-    // Rimuove "nm" e converte a intero
-    int codice = Integer.parseInt(nconst.substring(2)); 
-    int anno = Integer.parseInt(birthYearStr);
-    
-    // ... crea oggetto Attore ...
-} catch (NumberFormatException | StringIndexOutOfBoundsException e) {
-    // Ignora silenziosamente la riga corrotta e continua
-}
-```
-*   **`NumberFormatException`**: Catturata se una stringa non è un numero valido.
-*   **`StringIndexOutOfBoundsException`**: Catturata se, ad esempio, `nconst` è troppo corto.
-
-#### Fase 5: Memorizzazione
-
-Gli attori validati vengono istanziati come oggetti `Attore` e inseriti in una `HashMap<Integer, Attore>`, usando il codice numerico come chiave.
-
-```java
-Attore attore = new Attore(codice, primaryName, anno);
-attori.put(codice, attore);
-```
-L'uso di una `HashMap` garantisce un accesso quasi istantaneo (complessità media **O(1)**) agli attori, fondamentale per l'efficienza della fase successiva.
-
-### 1.2. Costruzione delle Relazioni tra Attori da `title.principals.tsv`
-
-Questa fase costruisce gli archi del grafo (le collaborazioni) analizzando il file delle partecipazioni ai film.
-
-#### Struttura Dati nella Classe `Attore`
-
-La classe `Attore` utilizza due `Set` per memorizzare le relazioni, una scelta di design cruciale.
-
-```java
-class Attore {
-    // ...
-    Set<Integer> coprotagonisti;
-    Set<Integer> titoliPartecipati;
-
-    public Attore(...) {
-        this.coprotagonisti = new HashSet<>();
-        this.titoliPartecipati = new HashSet<>();
-    }
-}
-```
-L'implementazione `HashSet` offre due vantaggi chiave:
-*   **Garanzia di Unicità**: Un `Set` non ammette duplicati. Questo assicura che un titolo o un co-protagonista non vengano aggiunti più volte, mantenendo il grafo semplice.
-*   **Performance**: Le operazioni di inserimento (`add`) e ricerca (`contains`) in un `HashSet` hanno una complessità media di **O(1)**, drasticamente più efficiente di una `List` (che richiederebbe O(n)).
-
-#### Algoritmo di Elaborazione "a Flusso"
-
-Il programma non carica l'intero `title.principals.tsv` in memoria, ma lo processa in modo sequenziale, sfruttando il fatto che le righe sono raggruppate per film (`tconst`).
-
-1.  **Accumulo del Cast**: Il programma legge le righe e, finché il `tconst` non cambia, accumula i codici degli attori di un film in un `Set<Integer> currentCast`. Per ogni attore, aggiunge il codice del film al suo `Set titoliPartecipati`.
-    ```java
-    Attore attore = attori.get(codiceAttore);
-    attore.titoliPartecipati.add(codiceTitolo); // Operazione O(1)
-    ```
-
-2.  **Elaborazione delle Relazioni**: Quando il `tconst` cambia, significa che il cast del film precedente è stato raccolto completamente. Viene quindi invocato il metodo `processCast(currentCast)`.
-
-3.  **Creazione degli Archi**: Il metodo `processCast` genera ogni coppia unica di attori all'interno del cast e stabilisce una relazione reciproca di co-protagonismo.
-    *   Il `Set` del cast viene convertito in una `List` per l'accesso tramite indice.
-    *   Due cicli `for` annidati (con `j = i + 1`) iterano su tutte le coppie uniche `(attore1, attore2)`.
-    *   Per ogni coppia, la relazione viene aggiunta in modo simmetrico:
-        ```java
-        // Aggiunge codice2 alla lista dei co-protagonisti di attore1
-        attore1.coprotagonisti.add(codice2);
-        // Aggiunge codice1 alla lista dei co-protagonisti di attore2
-        attore2.coprotagonisti.add(codice1);
-        ```
-
-Al termine del processo, il `currentCast` viene svuotato per accogliere il cast del film successivo.
+| Info | Details |
+| :--- | :--- |
+| **👤 Author** | **Giovanni Del Bianco** |
+| **☕ ETL Engine** | **Java** (Stream Processing, HashMap Indexing) |
+| **🚀 Core Engine** | **C99** (Pthreads, BFS, Binary Search Trees) |
+| **🐍 Analytics** | **Python 3** (Set Operations) |
+| **🧠 Key Concepts** | **Graph Theory**, **Producer-Consumer**, **IPC (Pipes)**, **Self-Pipe Trick**, **Memory Optimization**. |
+| **🎯 Goal** | Process 4M+ entities and 40M+ edges to find "Kevin Bacon numbers" (degrees of separation) efficiently. |
 
 ---
 
-## Parte 2: Ricerca di Cammini Minimi con `cammini.c` (C)
+## 🎬 Project Overview
 
-Il programma `cammini.c` utilizza il grafo generato per eseguire ricerche di cammini minimi, basandosi su algoritmi e strutture dati ottimizzate in C.
+### The Problem: Six Degrees of Separation
+This project tackles the challenge of analyzing the vast network of connections in the movie industry using real-world data from **IMDb**. The goal is to build a graph where:
+*   **Nodes** are actors/actresses.
+*   **Edges** represent a collaboration in a shared movie titles.
 
-### 2.1. Implementazione della Coda FIFO per la BFS
+Given the scale of the dataset (Gigabytes of TSV text files), a naive implementation would exhaust system memory or take hours to run.
 
-L'algoritmo Breadth-First Search (BFS), essenziale per trovare il cammino minimo in un grafo non pesato, richiede una coda FIFO (First-In, First-Out).
+### The Solution: A Three-Stage Pipeline
+To ensure performance and maintainability, the system is architected in three distinct stages, each leveraging the strengths of a specific language:
 
-#### Strutture Dati Fondamentali
+1.  **Data Ingestion (Java):** A memory-efficient parser that filters raw TSV data and constructs the adjacency list representation of the graph (`grafo.txt`) and an index of actor names (`nomi.txt`). It uses a streaming approach to process movie casts without loading the entire file into RAM.
+2.  **Pathfinding Engine (C):** A high-performance executable that loads the graph into optimized C structures. It uses a pool of **consumer threads** to parse the graph in parallel and a pool of **worker threads** to execute **Breadth-First Search (BFS)** queries, calculating the shortest path between any two actors.
+3.  **Collaborations Query (Python):** A utility script that cross-references the generated participation data to list exactly *which* movies two actors worked on together.
 
-La coda è realizzata come una lista concatenata singola, gestita da due strutture:
+---
 
-*   **`q_node_t`**: Il singolo nodo della coda.
-    ```c
-    typedef struct q_node {
-        int codice;
-        struct q_node *next;
-    } q_node_t;
-    ```
-*   **`fifo_queue_t`**: L'involucro che gestisce l'intera coda.
-    ```c
-    typedef struct {
-        q_node_t *head;
-        q_node_t *tail;
-    } fifo_queue_t;
-    ```
-    Mantenere un puntatore `tail` è fondamentale per garantire che l'operazione di `enqueue` (inserimento in coda) avvenga in tempo costante **O(1)**.
+## 🏗️ Architecture & Pipeline
 
-#### Scelta Progettuale: Minimalismo dei Nodi
-
-Ogni nodo della coda memorizza **esclusivamente l'identificativo intero (`int codice`)** dell'attore. Questa scelta minimalista offre vantaggi significativi:
-*   **Efficienza di Memoria**: Si gestiscono solo interi, riducendo drasticamente l'occupazione di memoria rispetto a memorizzare intere strutture `attore`.
-*   **Performance**: Le operazioni di `enqueue` e `dequeue` sono estremamente veloci, poiché manipolano solo un intero e un puntatore.
-*   **Separazione delle Competenze**: La coda gestisce solo l'ordine di visita. Informazioni aggiuntive (come il predecessore nel cammino) sono demandate a una struttura di supporto, l'Albero Binario di Ricerca.
-
-### 2.2. Ricostruzione del Cammino Minimo tramite Albero di Ricerca
-
-La BFS trova la destinazione, ma non fornisce direttamente il percorso. Questo viene ricostruito a ritroso grazie a informazioni salvate durante l'esplorazione.
-
-#### Struttura Dati di Supporto: l'Albero Binario di Ricerca (ABR)
-
-Durante la BFS, ogni nodo visitato viene inserito in un ABR. Il nodo dell'albero è progettato per memorizzare il predecessore nel cammino.
-
-```c
-typedef struct abr_node {
-    int shuffled_codice; // Chiave dell'albero (per bilanciamento)
-    int original_codice; // Codice attore originale
-    int parent_codice;   // Codice del predecessore nel cammino BFS
-    struct abr_node *left;
-    struct abr_node *right;
-} abr_node_t;
+```mermaid
+graph LR
+    A[IMDB Raw Data .tsv] -->|Stream Parse| B(Java ETL Engine)
+    B -->|Generates| C[Graph Files .txt]
+    C -->|Parallel Load| D(C Core Engine)
+    D -->|BFS| E[Shortest Paths]
+    C -->|Lookup| F(Python Script)
+    F -->|Set Intersect| G[Movie List]
 ```
-Il campo chiave è **`parent_codice`**. Quando la BFS esplora un `neighbor_codice` da un `current_codice`, memorizza questa relazione nell'ABR, creando un'associazione `(figlio -> genitore)` che permette di risalire il percorso. Il nodo di partenza ha un `parent_codice` speciale (`-1`) che funge da terminatore.
 
-#### Processo di Ricostruzione Passo-Passo
+---
 
-Una volta che la BFS trova la destinazione, parte il processo di backtracking:
+## ☕ Phase 1: Data Engineering (Java)
 
-1.  **Inizializzazione**: Una variabile `trace_codice` viene impostata sul codice di destinazione.
-2.  **Ciclo di Backtracking**: Un ciclo `while (trace_codice != -1)` risale il cammino:
-    a. Aggiunge il `trace_codice` corrente a un array che memorizza il percorso.
-    b. Cerca il nodo corrente nell'ABR.
-    c. Aggiorna `trace_codice` con il `parent_codice` trovato nel nodo dell'ABR. Questo è il passo fondamentale che fa "risalire" di un livello.
-3.  **Stampa del Risultato**: Al termine del ciclo, l'array del percorso contiene i codici in ordine inverso (destinazione -> partenza). Viene quindi iterato all'indietro per stampare il cammino nell'ordine corretto.
+The Java component (`CreaGrafo.java`) acts as the Extract-Transform-Load (ETL) layer. Its primary responsibility is to distill raw gigabyte-sized datasets into a compact graph format suitable for the C engine.
 
-### 2.3. Gestione della Terminazione Controllata (Self-Pipe Trick)
+### 1. Optimized Parsing Strategy (`name.basics.tsv`)
+Processing millions of lines requires efficient I/O management. The parsing logic is designed to filter data on the fly:
+*   **Buffered Reading:** Uses `BufferedReader` to minimize disk access latency.
+*   **Tokenization:** Each line is split by the tab delimiter (`\t`).
+*   **Strict Filtering:** The system immediately discards entries that do not meet the criteria (e.g., missing birth year `\N` or professions not containing "actor/actress").
+*   **In-Memory Indexing:** Valid actors are stored in a `HashMap<Integer, Attore>`.
+    *   **Key:** The integer ID derived from the `nconst` string (e.g., `nm0000102` -> `102`). This allows **O(1)** retrieval time during the subsequent graph construction phase.
 
-Per gestire la terminazione pulita del programma (es. con `Ctrl+C`) mentre è bloccato su una chiamata di I/O come `select()`, viene implementato il pattern **"self-pipe trick"**.
+### 2. Stream-Based Edge Generation (`title.principals.tsv`)
+Instead of loading the massive relationships file into memory, the program utilizes the file's natural sorting (grouped by `tconst`) to implement a **streaming algorithm**:
+1.  **Accumulation:** The parser reads lines sequentially, accumulating actor IDs into a temporary `Set<Integer> currentCast`.
+2.  **Trigger:** When the movie ID (`tconst`) changes, the system detects that the cast for the previous movie is complete.
+3.  **Clique Formation:** The method `processCast` generates a complete subgraph (clique) for the actors in `currentCast`. It adds a bidirectional edge between every pair of actors in the set.
+4.  **Flush:** The set is cleared, and memory is reused for the next movie.
 
-#### Architettura della Soluzione
+### 3. Storing Participations
+To support the full query system, the `Attore` class maintains two specific data structures:
+```java
+class Attore {
+    Set<Integer> coprotagonisti;    // Adjacency List (Edges)
+    Set<Integer> titoliPartecipati; // Movie IDs (Data for Python)
+}
+```
+*   **Usage of Sets:** `HashSet` is chosen over `ArrayList` to guarantee uniqueness (an actor cannot be a co-star of themselves or listed twice for the same connection) and to provide constant-time performance for insertions.
 
-Questo pattern trasforma un evento asincrono (un segnale) in un evento di I/O sincrono, che può essere gestito elegantemente dal loop principale.
+---
 
-1.  **Mascheramento del Segnale**: Nel `main`, il segnale `SIGINT` viene mascherato. Questa maschera è ereditata da tutti i thread, che quindi lo ignorano.
-2.  **Thread Gestore di Segnali**: Un thread dedicato attende i segnali in modo sincrono usando `sigwait()`. Questa chiamata si sblocca solo quando riceve `SIGINT`.
-3.  **Pipe di Comunicazione Interna**: Il `main` crea una pipe anonima.
-    *   L'estremo di lettura (`S_SELF_PIPE_FD[0]`) viene aggiunto al set di file descriptor monitorati da `select()`.
-    *   L'estremo di scrittura (`S_SELF_PIPE_FD[1]`) è usato dal thread gestore.
+## 🚀 Phase 2: The C Computational Core
 
-#### Flusso di Interruzione
+The C program (`cammini.c`) is engineered for speed. It loads the pre-processed graph and spawns worker threads to solve the Shortest Path problem using **Breadth-First Search (BFS)**.
 
-1.  **Segnale Ricevuto**: L'utente preme `Ctrl+C`.
-2.  **Attivazione del Gestore**: Il thread gestore si sblocca da `sigwait()`.
-3.  **Azione del Gestore**: Il thread scrive un singolo byte nella self-pipe.
+### 1. High-Performance Graph Loading
+To parse the massive `grafo.txt` file (40M+ edges), a sequential read would be too slow. The system implements a **Producer-Consumer** pattern:
+*   **Main Thread (Producer):** Reads lines from the file and pushes raw strings into a thread-safe `line_buffer_t`.
+*   **Worker Threads (Consumers):** Multiple threads pull lines from the buffer, parse the integers, and populate the pre-allocated adjacency arrays (`attore->cop`) in parallel using fine-grained memory reallocation (`realloc` with exponential growth strategy).
+
+### 2. BFS Implementation & Data Structures
+The search algorithm relies on two custom-built structures to manage the exploration frontier and history.
+
+#### 🔹 The FIFO Queue (Frontier)
+A lightweight linked-list queue manages the nodes to visit.
+*   **Structure:** `q_node_t` contains only the `int codice` and a `next` pointer.
+*   **Efficiency:** By storing only integer IDs (4 bytes) instead of full pointers, cache locality is improved and memory overhead is minimized. Operations `enqueue` and `dequeue` are O(1).
+
+#### 🔹 The Binary Search Tree (History & Visited Set)
+To avoid cycles and reconstruct the path, visited nodes are stored in a Balanced Binary Search Tree (ABR).
+*   **Node Structure:**
     ```c
-    char dummy = 'q';
-    write(S_SELF_PIPE_FD[1], &dummy, 1);
+    typedef struct abr_node {
+        int shuffled_codice; // Key for balancing
+        int original_codice; // Actual Actor ID
+        int parent_codice;   // Back-pointer to the predecessor
+        // ... left/right pointers
+    } abr_node_t;
     ```
-4.  **Sblocco di `select()`**: La scrittura sulla pipe rende l'estremo di lettura "pronto". La chiamata `select()` nel `main` si sblocca immediatamente, non per un errore (`EINTR`), ma perché ha rilevato attività su un file descriptor.
-5.  **Riconoscimento e Terminazione**: Il `main` rileva attività sull'estremo di lettura della self-pipe, capisce che è un segnale di terminazione, imposta una variabile booleana per uscire dal suo loop `while` e procede con il cleanup controllato delle risorse.
+*   **Path Reconstruction:** The `parent_codice` field is the "breadcrumb". Once the target is reached, the algorithm backtracks from *Target* → *Parent* → *Parent's Parent* → ... until it reaches the *Source* (marked with -1).
+*   **The Shuffle Trick:** Since actor IDs are often sequential, inserting them directly into a BST would create a degenerate linked list (height O(N)). The system applies a bitwise `shuffle()` function to IDs before insertion, effectively randomizing the keys and keeping the tree balanced (height O(log N)).
+
+### 3. System Programming: Robust Signal Handling
+The application must respond gracefully to `SIGINT` (Ctrl+C) without crashing, even when blocked on I/O operations. This is achieved via the **Self-Pipe Trick**:
+1.  **Signal Masking:** `SIGINT` is blocked in all threads using `pthread_sigmask`.
+2.  **Dedicated Thread:** A separate thread waits on `sigwait()`.
+3.  **Notification:** When a signal arrives, the handler writes a single byte to a specific pipe (`S_SELF_PIPE_FD`).
+4.  **Event Loop:** The main thread uses `select()` to monitor both the data pipe (from external commands) and the self-pipe. When `select()` detects activity on the self-pipe, it triggers a clean shutdown sequence.
+
+---
+
+## 🐍 Phase 3: Analytics (Python)
+
+The final component, `collaborazioni.py`, answers the user's specific questions about the relationship between two actors.
+*   **Input:** Reads the `partecipazioni.txt` file (generated by Java) and `title.basics.tsv`.
+*   **Logic:** It loads the data into efficient Python `set` structures. To find collaborations, it performs a **Set Intersection** between the movie lists of two actors.
+*   **Result:** Outputs the exact titles of the movies they worked on together.
+
+---
+
+## 🛠️ Tech Stack & Requirements
+
+*   **Languages:**
+    *   **Java 8+** (with `-Xmx4g` for large heap).
+    *   **C99** (`gcc`, `pthread`, `math`).
+    *   **Python 3.x**.
+*   **OS:** Linux (Mandatory for POSIX signals and pipes).
+*   **Tools:** GNU Make, Valgrind (for memory checks).
+
+---
+
+## 📂 Repository Structure
+
+```text
+IMDB-Graph-Explorer/
+├── CreaGrafo.java        # Java Source: ETL and Graph Construction
+├── cammini.c             # C Source: Multithreaded BFS Engine
+├── collaborazioni.py     # Python Script: Collaborative Filtering
+├── Makefile              # Unified build script
+├── README.md             # Project Documentation
+└── (Generated Files)     # nomi.txt, grafo.txt, partecipazioni.txt
+```
+
+---
+
+## ⚙️ Build & Execution Guide
+
+The project uses a unified `Makefile` to handle the compilation of both Java and C components.
+
+### 1. Build Everything
+Compiles the C engine (optimized mode) and Java classes.
+```bash
+make
+```
+
+### 2. Run the Data Pipeline (Java)
+Parses the raw TSV files and generates the graph. Ensure you have the dataset files in the current directory.
+```bash
+# Usage: make run_java
+make run_java
+```
+*Outputs: `nomi.txt`, `grafo.txt`, `partecipazioni.txt`.*
+
+### 3. Run the Core Engine (C)
+Launch the pathfinding server.
+```bash
+# Syntax: ./cammini.out <names_file> <graph_file> <num_consumer_threads>
+./cammini.out nomi.txt grafo.txt 4
+```
+*The program will load the graph and wait for queries on `cammini.pipe`.*
+
+### 4. Query Collaborations (Python)
+Find out which movies two actors share.
+```bash
+# Syntax: python3 collaborazioni.py <participations_file> <titles_file> <id1> <id2> ...
+python3 collaborazioni.py partecipazioni.txt title.basics.tsv 350125 7746
+```
+
+
+## 📜 License
+
+This project is released under the MIT License. For full details, please consult the LICENSE file included in the repository.
